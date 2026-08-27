@@ -76,6 +76,9 @@ import numpy as np
 
 import config
 
+# Set by --force: make every stage re-run instead of skipping completed work.
+FORCE = False
+
 
 # ===========================================================================
 #  SECTION A - small helpers used by everything below
@@ -211,10 +214,22 @@ def stage_preprocess():
              "--exposure", config.DOSE_PER_TILT],
             "create_settings_frameseries", cwd=config.DATA_DIR)
 
-    # Warp writes one XML of results per movie; if they are all there, skip.
-    done = len(list((config.DATA_DIR / "warp_frameseries").glob("*.xml"))) \
-        if (config.DATA_DIR / "warp_frameseries").exists() else 0
-    if done < 41 * len(config.SERIES_NUMBERS):
+    # Warp writes one XML of results per movie, named after the movie. Compare
+    # those NAMES against the movies actually present, rather than counting
+    # against an expected total: the frames folder may hold more movies than the
+    # five tilt series need (a wildcard download leaves extras), and a run that
+    # was interrupted part-way leaves a partial set. Counting alone cannot tell
+    # "finished" from "stopped after enough files to look finished".
+    movies = {m.stem for m in config.FRAMES_DIR.glob("*.tif")} \
+        if config.FRAMES_DIR.exists() else set()
+    fs_dir = config.DATA_DIR / "warp_frameseries"
+    processed = {x.stem for x in fs_dir.glob("*.xml")} if fs_dir.exists() else set()
+    outstanding = movies - processed
+
+    if outstanding or FORCE:
+        print(f"    {len(processed)}/{len(movies)} movies already done, "
+              f"{len(outstanding)} to go")
+        print("    (Warp skips movies it has already processed, so this resumes)")
         cmd = ["WarpTools", "fs_motion_and_ctf",
                "--settings", "warp_frameseries.settings",
                "--m_grid", "1x1x3",
@@ -232,10 +247,14 @@ def stage_preprocess():
         secs, _ = run(cmd, "fs_motion_and_ctf", cwd=config.DATA_DIR)
         append_runtime("frame_series_motion_ctf", "shared", secs,
                        len(config.TILT_SERIES), "shared by both branches")
+    elif movies:
+        print(f"    all {len(movies)} movies already processed - skipping")
     else:
-        print("    frame series already processed - skipping")
+        sys.exit(f"No movies found in {config.FRAMES_DIR}. "
+                 f"Run: python setup_data.py --download")
 
-    if not config.TOMOSTAR_DIR.exists() or not list(config.TOMOSTAR_DIR.glob("*.tomostar")):
+    if FORCE or not config.TOMOSTAR_DIR.exists() \
+            or not list(config.TOMOSTAR_DIR.glob("*.tomostar")):
         # --dont_invert sets the geometric handedness of the reconstruction.
         # It is a property of this microscope + acquisition software, and the
         # tutorial tells us this is the right choice for EMPIAR-10491.
@@ -1042,6 +1061,8 @@ def main():
     ap.add_argument("--pytom-pick", action="store_true")
     ap.add_argument("--collect", action="store_true",
                     help="rebuild the CSV tables from existing outputs (no GPU)")
+    ap.add_argument("--force", action="store_true",
+                    help="redo a stage even if its output looks complete")
     args = ap.parse_args()
 
     stages = [args.preprocess, args.align, args.reconstruct,
@@ -1049,8 +1070,12 @@ def main():
     if not (args.all or any(stages)):
         ap.error("choose --all or one or more individual stages")
 
+    global FORCE
+    FORCE = args.force
     print(config.describe())
     print(f"\nData directory: {config.DATA_DIR}")
+    if FORCE:
+        print("--force: stages will re-run even if their output looks complete")
 
     if args.all or args.preprocess:
         stage_preprocess()

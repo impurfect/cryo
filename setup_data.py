@@ -170,6 +170,12 @@ def software_inventory():
         # from IMOD's own VERSION file rather than from -h output.
         check_tool("IMOD (etomo)", "etomo", 'cat "$IMOD_DIR/VERSION"',
                    r"[\d]+\.[\d.]+"),
+        # etomo is a Java program, and batchruntomo shells out to it. Without a
+        # JRE, patch tracking fails on every tilt series with "no java runtime
+        # in the current search path" - after Warp has already spent time
+        # building the tilt stacks. Cheap to check, expensive to discover late.
+        check_tool("Java (for IMOD etomo)", "java", "java -version",
+                   r"version\s+\"?[\d._]+"),
         check_tool("IMOD (tiltxcorr)", "tiltxcorr", "tiltxcorr -h",
                    r"[Vv]ersion\s+[\d.]+\S*"),
         check_tool("IMOD (tiltalign)", "tiltalign", "tiltalign -h",
