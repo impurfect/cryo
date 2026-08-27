@@ -215,17 +215,21 @@ def stage_preprocess():
     done = len(list((config.DATA_DIR / "warp_frameseries").glob("*.xml"))) \
         if (config.DATA_DIR / "warp_frameseries").exists() else 0
     if done < 41 * len(config.SERIES_NUMBERS):
-        secs, _ = run(["WarpTools", "fs_motion_and_ctf",
-                       "--settings", "warp_frameseries.settings",
-                       "--m_grid", "1x1x3",
-                       "--c_grid", "2x2x1",
-                       "--c_range_max", 7,
-                       "--c_defocus_max", 8,
-                       "--c_use_sum",
-                       "--out_averages",
-                       "--out_average_halves",
-                       "--perdevice", config.PERDEVICE_WORKERS],
-                      "fs_motion_and_ctf", cwd=config.DATA_DIR)
+        cmd = ["WarpTools", "fs_motion_and_ctf",
+               "--settings", "warp_frameseries.settings",
+               "--m_grid", "1x1x3",
+               "--c_grid", "2x2x1",
+               "--c_range_max", 7,
+               "--c_defocus_max", 8,
+               "--c_use_sum",
+               "--out_averages",
+               "--perdevice", config.PERDEVICE_WORKERS]
+        # Half-set averages are only the input for Noise2Noise denoising, which
+        # this project deliberately does not do (see config.WRITE_HALF_AVERAGES).
+        # They cost ~19 GB and nothing downstream reads them.
+        if config.WRITE_HALF_AVERAGES:
+            cmd.insert(-2, "--out_average_halves")
+        secs, _ = run(cmd, "fs_motion_and_ctf", cwd=config.DATA_DIR)
         append_runtime("frame_series_motion_ctf", "shared", secs,
                        len(config.TILT_SERIES), "shared by both branches")
     else:
@@ -974,6 +978,12 @@ def _collect_parameters():
     software.
     """
     rows = [
+        {"scope": "environment", "parameter": "CUDA runtime",
+         "warp_or_etomo": "12.9 (Warp 2.0.0dev38+ build target)",
+         "aretomo_or_pytom": "AreTomo2 Cuda12x binary, borrowing the same "
+                             "runtime; PyTom/CuPy on CUDA 12",
+         "note": "one conda environment, one CUDA runtime; the host supplies "
+                 "only the driver"},
         {"scope": "shared", "parameter": "dataset", "warp_or_etomo": f"EMPIAR-{config.EMPIAR_ACCESSION}",
          "aretomo_or_pytom": f"EMPIAR-{config.EMPIAR_ACCESSION}",
          "note": "apoferritin, 5 tilt series"},

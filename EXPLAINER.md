@@ -187,8 +187,8 @@ a *lot* of trials, and each one is a full 3D correlation.
 **Symmetry is the shortcut.** Apoferritin, the molecule here, is a hollow shell
 so symmetric that **24 different rotations leave it looking identical**
 (*octahedral symmetry*, written **O** — the symmetry of a cube). So you only
-need to search 1/24 of orientation space. This is why the earlier draft's
-`--symmetry C1` (meaning "no symmetry") was such a costly mistake.
+need to search 1/24 of orientation space. Telling the software `C1`, meaning
+"no symmetry", costs a factor of twenty-four for no benefit.
 
 **Two programs, again — this is Task 2:**
 
@@ -230,10 +230,11 @@ exactly what you want in a benchmark.
 **EMD-15854** — a published 1.8 Å map of that same apoferritin, used as the
 template. Both pickers use this identical file.
 
-> ⚠️ The earlier draft called EMD-15854 a **ribosome** (a ~300 Å molecular
-> machine) and downloaded **EMPIAR-10164** (immature HIV virus particles). Wrong
-> molecule, wrong sample. Diameter, mask size, symmetry and match tolerance all
-> follow from getting this right.
+> ⚠️ EMD-15854 is sometimes mistaken for a **ribosome** (a ~300 Å molecular
+> machine), and EMPIAR-10491 for **EMPIAR-10164** (immature HIV virus particles).
+> Both errors are costly: template diameter, mask size, symmetry and the distance
+> tolerance for "same particle" all follow from the molecule being a 130 Å
+> octahedral shell.
 
 ---
 

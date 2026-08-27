@@ -96,6 +96,20 @@ GAIN_FLIP_Y = True
 # rotates about this axis inside the microscope. IMOD refines it from this seed.
 INITIAL_TILT_AXIS = -85.6
 
+# Should Warp also write "half-set" averages - two extra images per movie, made
+# from alternating halves of the frames?
+#
+# The tutorial turns these on (--out_average_halves) because they are the input
+# for Noise2Noise denoising, which produces prettier tomograms for looking at.
+# This project never denoises: denoising would change the tomograms in ways that
+# could differ between the two alignment branches, which is exactly the confound
+# we are trying to avoid, and template matching works on the raw reconstruction.
+#
+# They cost about 19 GB for this dataset and nothing here reads them, so they
+# are off by default. Set this to True to reproduce the tutorial byte for byte,
+# or if you want to denoise afterwards - and budget the extra disk.
+WRITE_HALF_AVERAGES = False
+
 
 # ---------------------------------------------------------------------------
 # 4. PROCESSING RESOLUTION
@@ -249,5 +263,6 @@ def describe() -> str:
         f"symmetry {TEMPLATE_SYMMETRY}\n"
         f"Pick cutoff  : {PICK_THRESHOLD_SIGMA} sigma\n"
         f"Match radius : {MATCH_RADIUS_A:.0f} A "
-        f"({MATCH_RADIUS_A / TOMO_ANGPIX:.1f} voxels at {TOMO_ANGPIX} A/px)"
+        f"({MATCH_RADIUS_A / TOMO_ANGPIX:.1f} voxels at {TOMO_ANGPIX} A/px)\n"
+        f"Half averages: {'yes (tutorial default)' if WRITE_HALF_AVERAGES else 'no (saves ~19 GB; only needed for denoising)'}"
     )

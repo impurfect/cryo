@@ -27,6 +27,7 @@ an interrupted download.
 """
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -57,18 +58,46 @@ def _run(cmd, timeout=120):
         return 124, "timed out"
 
 
-def check_tool(name, executable, version_cmd):
+def check_tool(name, executable, version_cmd, version_regex=None):
     """Confirm one program exists and capture the line that names its version.
 
     We return a dictionary rather than printing, because run_workflow.py stores
     these dictionaries in the results table - the software inventory becomes
     part of the deliverable, not just something on the screen.
+
+    Being on PATH is not the same as being runnable. AreTomo2 is a bare binary
+    that links against the CUDA runtime (libcudart, libcufft). Those live in the
+    conda environment's lib directory, which conda does NOT add to
+    LD_LIBRARY_PATH - Python and .NET find their own libraries through RPATH, so
+    nothing else in the stack notices. AreTomo2 is therefore present, on PATH,
+    and completely unable to start. We look for that specific failure and say so,
+    instead of printing a healthy tick next to a linker error.
     """
     path = shutil.which(executable)
     if path is None:
         return {"tool": name, "found": False, "path": "", "version": "NOT FOUND"}
 
     _, out = _run(version_cmd)
+
+    # Several of these tools exit non-zero, or print a stack trace, even when
+    # they are working perfectly - WarpTools prints its version banner and then
+    # aborts because "--version" is not one of its verbs. What we actually care
+    # about is whether the binary STARTED, which the banner proves. So when a
+    # tool gives us a version regex, a match counts as success no matter what
+    # the process did afterwards.
+    if version_regex:
+        m = re.search(version_regex, out)
+        if m:
+            return {"tool": name, "found": True, "path": path,
+                    "version": m.group(0).strip()}
+
+    if "error while loading shared libraries" in out or "cannot open shared object" in out:
+        missing = re.search(r"(lib[\w.+-]+\.so[\w.]*)", out)
+        return {"tool": name, "found": False, "path": path,
+                "version": f"INSTALLED BUT CANNOT RUN - missing "
+                           f"{missing.group(1) if missing else 'a shared library'}. "
+                           f"The library is almost certainly in $CONDA_PREFIX/lib "
+                           f"but not on LD_LIBRARY_PATH - see README 2.6."}
     # A version banner is usually in the first few lines; keep the first line
     # that actually mentions a number, otherwise just the first non-empty line.
     lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
@@ -97,18 +126,28 @@ def software_inventory():
     """Check everything at once and return the full inventory as a list."""
     return [
         check_gpu(),
-        check_tool("WarpTools", "WarpTools", "WarpTools --version"),
-        check_tool("AreTomo2", "AreTomo2", "AreTomo2"),
-        check_tool("IMOD (etomo)", "etomo", "imodinfo -h"),
-        check_tool("IMOD (tiltalign)", "tiltalign", "tiltalign -h"),
+        # "WarpTools --version" prints the banner then crashes: --version is not
+        # a verb. --help is the supported way in, and the banner carries the
+        # version either way.
+        check_tool("WarpTools", "WarpTools", "WarpTools --help",
+                   r"Version\s+[\d.]+\S*"),
+        check_tool("AreTomo2", "AreTomo2", "AreTomo2",
+                   r"AreTomo2\s+[\d.]+"),
+        check_tool("IMOD (etomo)", "etomo", "imodinfo -h",
+                   r"[Vv]ersion\s+[\d.]+\S*"),
+        check_tool("IMOD (tiltalign)", "tiltalign", "tiltalign -h",
+                   r"[Vv]ersion\s+[\d.]+\S*"),
         check_tool("PyTom match", "pytom_match_template.py",
-                   "pytom_match_template.py --version"),
+                   "pytom_match_template.py --help",
+                   r"pytom[_-]match[_-]pick\s+[\d.]+"),
     ]
 
 
 def print_inventory(inv):
     """Show the inventory as a small table and say whether we can proceed."""
     print("\n--- software inventory " + "-" * 50)
+    print("  (run this with the 'cryoet' conda environment active: WarpTools and")
+    print("   AreTomo2 both need its CUDA runtime in order to start at all)")
     for row in inv:
         mark = "OK     " if row["found"] else "MISSING"
         print(f"  {mark} {row['tool']:<20} {row['version']}")
@@ -140,6 +179,28 @@ def _wget(url, dest_dir, quiet=False):
         cmd.append("--show-progress")
     cmd.append(url)
     return subprocess.run(cmd).returncode == 0
+
+
+def check_disk_space(need_gb=45):
+    """Refuse to start a 13 GB download onto a disk that cannot finish the job.
+
+    The download itself is 13 GB, but Warp's motion-corrected averages need
+    roughly another 10 GB on top, so the real requirement before preprocessing
+    is closer to 45 GB free. Finding that out three hours in, with a half-written
+    dataset, is a bad afternoon.
+    """
+    st = shutil.disk_usage(config.DATA_DIR.parent if config.DATA_DIR.exists()
+                           else Path.home())
+    free_gb = st.free / 1e9
+    print(f"\nDisk: {free_gb:.0f} GB free of {st.total / 1e9:.0f} GB")
+    if free_gb < need_gb:
+        print(f"  WARNING: about {need_gb} GB is needed for the raw data plus "
+              f"Warp's motion-corrected averages.")
+        print(f"  Free some space, attach a bigger disk, or point CRYOET_DATA_DIR "
+              f"at one:")
+        print(f"      export CRYOET_DATA_DIR=/mnt/disks/big/empiar10491")
+        return False
+    return True
 
 
 def download_raw_data():
@@ -219,6 +280,8 @@ def report_data_status():
         code, out = _run(f"du -sh {config.DATA_DIR}")
         if code == 0:
             print(f"  size on disk   : {out.split()[0]}")
+        st = shutil.disk_usage(config.DATA_DIR)
+        print(f"  free space     : {st.free / 1e9:.0f} GB")
     print("-" * 72)
 
     ok = (config.GAIN_PATH.exists() and n_mdoc == len(config.SERIES_NUMBERS)
@@ -239,6 +302,8 @@ def main():
                     help="only verify software and report data status")
     ap.add_argument("--download", action="store_true",
                     help="download the EMPIAR data and the EMDB template")
+    ap.add_argument("--force", action="store_true",
+                    help="download even if free disk space looks insufficient")
     args = ap.parse_args()
     if not (args.check or args.download):
         ap.error("choose --check or --download")
@@ -252,6 +317,8 @@ def main():
         if shutil.which("wget") is None:
             sys.exit("wget is required for downloading. Install it first "
                      "(Debian/Ubuntu: sudo apt-get install -y wget).")
+        if not check_disk_space() and not args.force:
+            sys.exit("Stopping. Re-run with --force to download anyway.")
         download_raw_data()
         download_template()
 

@@ -1,7 +1,4 @@
-# Cryo-ET workflow comparison
-
-[`Background material`](https://claude.ai/code/artifact/20a34c73-4009-4834-ae57-0bdb29a0a0fa)
-
+# Cryo-ET workflow comparison — St. Jude technical assessment
 
 Comparing two **tilt-series alignment** methods and two **particle-picking**
 methods on the official Warp tilt-series tutorial dataset, with a reproducible
@@ -114,17 +111,19 @@ must not be compared across methods.
 
 ---
 
-## Part 2 — Machine and environment setup
+## Part 2 — Setup
 
 The three GPU programs (WarpTools, AreTomo2, PyTom) are **NVIDIA CUDA only**.
-There is no Apple-Metal or CPU version, and Docker or a VM on an Apple-silicon
-Mac does not turn an Apple GPU into a CUDA GPU. A Mac can run `analyze.py` and
+There is no Apple-Metal or CPU build, and Docker or a VM on an Apple-silicon Mac
+does not turn an Apple GPU into a CUDA GPU. A Mac can run `analyze.py` and
 `dashboard.py`; it cannot run `run_workflow.py`.
 
-### 2.1 The GCP instance
+Written for Debian 12/13 on GCP with an NVIDIA L4. RHEL-family equivalents are
+noted inline where they differ.
 
-An **NVIDIA L4** (24 GB, compute capability 8.9) is a good fit — Warp's
-algorithms target ~16 GB cards.
+---
+
+### 2.1 The machine
 
 ```bash
 gcloud compute instances create cryoet \
@@ -132,161 +131,354 @@ gcloud compute instances create cryoet \
   --machine-type=g2-standard-16 \
   --accelerator=type=nvidia-l4,count=1 \
   --maintenance-policy=TERMINATE \
-  --boot-disk-size=200GB --boot-disk-type=pd-balanced \
-  --image-family=ubuntu-2204-lts --image-project=ubuntu-os-cloud
+  --boot-disk-size=120GB --boot-disk-type=pd-balanced \
+  --image-family=debian-13 --image-project=debian-cloud
 ```
 
-**200 GB is comfortable; ~120 GB is the floor.** Where it goes:
+An **L4** (24 GB) suits Warp, whose algorithms target ~16 GB cards. Debian 12 and
+13 both work; the only difference is the system Python (3.11 vs 3.13), and either
+is fine.
+
+**120 GB is enough with room to spare**, provided `WRITE_HALF_AVERAGES` stays
+`False` in `config.py` (the default):
 
 | | size |
 |---|---|
-| Ubuntu + NVIDIA driver + CUDA | ~20 GB |
-| conda envs (warp ~10, pytom ~5) + IMOD | ~17 GB |
+| OS + NVIDIA driver | ~15 GB |
+| conda envs (warp ~10, pytom ~5) + IMOD ~3 | ~18 GB |
 | raw movies, 5 tilt series | ~13 GB |
-| Warp motion-corrected averages + half-sets | ~29 GB |
+| Warp motion-corrected averages | ~10 GB |
 | tilt stacks, tomograms, correlation volumes, both branches | ~2 GB |
-| **total in use** | **~81 GB** |
+| **in use** | **~58 GB** |
 
-The tomograms themselves are tiny — 347x474x79 voxels, 26 MB each — because
-everything after alignment runs at 10 A/pixel. The bulk is the raw movies and
-the motion-corrected averages Warp writes alongside them.
+The tomograms are tiny — 347×474×79 voxels, 26 MB each — because everything
+after alignment runs at 10 Å/pixel. The bulk is raw movies and the averages Warp
+writes beside them. Setting `WRITE_HALF_AVERAGES = True` reproduces the tutorial
+exactly and adds ~19 GB; those files are only used for denoising, which this
+project does not do.
 
-Install the driver and confirm the GPU is visible:
+### 2.2 The NVIDIA driver
 
 ```bash
-sudo apt-get update && sudo apt-get install -y build-essential wget git unzip
-curl -O https://raw.githubusercontent.com/GoogleCloudPlatform/compute-gpu-installation/main/linux/install_gpu_driver.py
-sudo python3 install_gpu_driver.py
-nvidia-smi          # must list the L4 before you go any further
+cd ~
+curl -LO https://github.com/GoogleCloudPlatform/compute-gpu-installation/releases/download/cuda-installer-v1.9.1/cuda_installer.pyz
+
+# Install the build prerequisites yourself, against the kernel already running.
+sudo apt-get update
+sudo apt-get install -y make gcc pciutils dkms cmake git "linux-headers-$(uname -r)"
+
+# Mark that stage done so the installer goes straight to the driver.
+sudo mkdir -p /opt/google/cuda-installer
+echo "prerequisites installed manually against the running kernel" \
+  | sudo tee /opt/google/cuda-installer/prerequisites
+
+sudo python3 cuda_installer.pyz install_driver
+nvidia-smi                      # must list the L4 before going further
 ```
 
-### 2.2 Why you need conda AND a venv
+**Why not just `install_driver` on its own?** Left to itself the installer picks a
+kernel to upgrade to by sorting version strings as text, so it chooses `6.12.96`
+over `6.12.105`, then assumes a matching `linux-headers` package exists — and for
+that version it does not. The install dies with `Unable to locate package
+linux-headers-6.12.96+deb13-cloud-amd64`.
 
-This tripped me up in an earlier draft, so here it is plainly.
+Doing the prerequisites by hand sidesteps that, and is better regardless: the
+installer wanted to install a *different* kernel and reboot into it, whereas this
+builds against the kernel you are already running. **No reboot, and no chance of
+a kernel/headers mismatch.** The installer records finished stages as files in
+`/opt/google/cuda-installer/`, which is why writing `prerequisites` makes it skip
+ahead.
 
-**WarpTools and PyTom are not on PyPI.** `pip install warptools` does not exist —
-WarpTools ships only as a conda package, and PyTom needs CuPy built against your
-CUDA version, which conda handles and pip does not. So **conda is not optional**,
-whatever you would prefer.
+If DKMS complains, confirm the headers are where it looks:
+`ls -d /lib/modules/$(uname -r)/build`
 
-You end up with three environments, each used at a different point. They never
-need to be active at the same time:
+`cuda_installer.pyz` supports Debian 12/13, RHEL 8/9/10, Rocky and Ubuntu. Check
+the [releases page](https://github.com/GoogleCloudPlatform/compute-gpu-installation/releases)
+for anything newer than v1.9.1.
 
-| # | environment | tool | holds | used for |
-|---|---|---|---|---|
-| A | `warp` | conda | WarpTools (+ IMOD and AreTomo2 on `PATH`) | preprocessing, both alignments, reconstruction, Warp picking |
-| B | `pytom` | conda | pytom-match-pick, CuPy | the PyTom picking step only |
-| C | `~/venvs/cryoet` | venv, Python 3.11 | numpy, pandas, scipy, matplotlib, mrcfile, starfile, streamlit | building the CSV tables, the analysis, the dashboard |
+**Skip `install_cuda`.** Every CUDA runtime this project needs comes from the
+conda environments; the host supplies only the driver. Any driver from the 550
+series up is fine — Warp and AreTomo2 need >= 520.
 
-Environment C is the plain Python 3.11 venv. It is deliberately separate because
-it is the only one you also want on your laptop — `analyze.py` and
-`dashboard.py` need no GPU and no cryo-ET software, so you can pull the small
-CSV tables down from the VM and do all the analysis and plotting locally.
+<details>
+<summary><b>Fallback: Debian's own driver</b></summary>
 
-**Install conda first** (Miniforge — two commands, no licence issues):
+If the installer still refuses, Debian ships 550.x/535.x in non-free, both fine
+here:
 
 ```bash
+sudo sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' \
+  /etc/apt/sources.list.d/debian.sources
+sudo apt-get update && sudo apt-get install -y nvidia-driver firmware-misc-nonfree
+sudo reboot
+```
+</details>
+
+### 2.3 System packages
+
+```bash
+sudo apt-get install -y build-essential wget curl unzip git python3-venv \
+                        libgl1 libglu1-mesa libx11-6 libxext6 libxt6 libsm6 libice6
+```
+
+The X and GL libraries are for IMOD, which links against them even for its
+command-line programs. You will not use its GUI on a headless VM, but it will not
+start without them.
+
+*RHEL family:* `sudo dnf install -y gcc gcc-c++ make wget curl unzip git libGL
+libGLU libX11 libXext libXt mesa-libGL` — and no `python3-venv` equivalent is
+needed, since `venv` ships inside the `python3` package there.
+
+### 2.4 The code
+
+```bash
+git clone <your-repo-url> ~/cryo
+cd ~/cryo
+ls config.py                    # must exist - if not, cd into the subfolder that has it
+```
+
+Only the folder holding these five Python scripts is needed — about 1 MB. Every
+command from here on runs from that directory; it is written as `~/cryo` below.
+
+Do **not** copy the raw data up. `setup_data.py --download` pulls it straight
+from EMBL-EBI to the VM, far faster than routing through a laptop.
+
+### 2.5 The environment
+
+**One conda environment holds everything.** Warp, PyTom and the analysis stack
+all run on CUDA 12 and Python 3.11, so there is nothing to keep apart.
+
+Warp is not on PyPI — it ships only as a conda package — so conda is required
+either way. Miniforge is conda-forge's distribution: same `conda`, none of
+Anaconda's licensing terms.
+
+```bash
+cd ~
 wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
 bash Miniforge3-Linux-x86_64.sh -b -p ~/miniforge3
-~/miniforge3/bin/conda init bash && exec bash     # `conda` now works in new shells
+~/miniforge3/bin/conda init bash
+exec bash                       # reopen the shell so conda lands on PATH
+conda --version
 ```
 
-**Then environment C**, the analysis venv:
+`exec bash` matters — without it `conda activate` will not work in this shell.
+
+Check the solve before committing to it (fast, changes nothing):
 
 ```bash
-sudo apt-get install -y python3.11 python3.11-venv python3.11-dev
-
-python3.11 -m venv ~/venvs/cryoet
-source ~/venvs/cryoet/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -c "import numpy, pandas, scipy, matplotlib, mrcfile, starfile, streamlit; print('analysis env OK')"
-deactivate
+conda create -n cryoet --dry-run \
+  -c warpem -c pytorch -c conda-forge \
+  warp=2.0.0 cupy "cuda-version=12.9" \
+  numpy pandas scipy matplotlib mrcfile starfile streamlit
 ```
 
-> **If you're on the Mac and hit a macOS "malware" popup:** the `.venv` in the
-> old part of this repo was copied from a different machine — its `pyvenv.cfg`
-> still points at another user's home directory. Virtual environments are not
-> portable. Delete it and build a fresh one. Don't strip quarantine attributes.
-
-### 2.3 Getting the code onto the VM
-
-Only `cryoet_comparison/` is needed — 1.2 MB, 37 files. Nothing else in the
-repository is used at runtime.
+If it resolves, drop `--dry-run` and add `-y`. A few GB, 10-20 minutes.
 
 ```bash
-# from your Mac, in the repo root
-gcloud compute scp --recurse cryoet_comparison cryoet:~/ --zone=us-central1-a
+conda create -n cryoet -y \
+  -c warpem -c pytorch -c conda-forge \
+  warp=2.0.0 cupy "cuda-version=12.9" \
+  numpy pandas scipy matplotlib mrcfile starfile streamlit
+
+conda activate cryoet
+python -m pip install "pytom-match-pick[plotting]"
+
+WarpTools --help | head -3          # banner should read "Version 2.0.0"
+pytom_match_template.py --help | head -3
+python -c "import numpy, pandas, scipy, matplotlib, mrcfile, starfile, streamlit; print('analysis stack OK')"
+conda list warp                      # the exact build, e.g. 2.0.0dev40
 ```
 
-Or, if the repo is on GitHub, `git clone` on the VM is simpler and makes it
-trivial to pull fixes later. Either way you end up with `~/cryoet_comparison/`,
-and every command below is run from inside it.
+> **`WarpTools --version` prints the version and then crashes** with
+> `System.NullReferenceException` — `--version` is not one of its verbs, so the
+> parser dereferences a null after printing the banner. This is cosmetic: the
+> banner appearing at all proves the binary started and resolved its CUDA and
+> .NET dependencies, which is the thing worth checking. Use `--help`.
+>
+> Note the binary reports `2.0.0` while the conda package is `2.0.0dev40`.
+> `conda list warp` gives the precise build, and `setup_data.py --check` records
+> whichever string it finds into `software_versions.csv`.
 
-Do **not** copy the raw data up — `setup_data.py --download` pulls it directly
-from EMBL-EBI to the VM, which is far faster than going via your laptop.
+Everything after this runs with `cryoet` active. There is no environment
+switching anywhere in the workflow.
 
-### 2.4 The cryo-ET software
+<details>
+<summary><b>If the solver cannot satisfy everything at once</b></summary>
 
-Four installs. Each gets verified by `setup_data.py --check`, which records the
-version it finds into `results/tables/software_versions.csv`.
+Split PyTom out — it is the only piece installed with pip, and the only one that
+could conflict:
 
 ```bash
-# Miniforge (conda) - Warp and PyTom are distributed as conda environments
-wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
-bash Miniforge3-Linux-x86_64.sh -b -p ~/miniforge3
-source ~/miniforge3/etc/profile.d/conda.sh
+conda create -n pytom -c conda-forge python=3.11 cupy "cuda-version=12" -y
+conda activate pytom && python -m pip install "pytom-match-pick[plotting]" starfile
 ```
 
-**1 — WarpTools** ([docs](https://warpem.github.io/warp/user_guide/warptools/installation/))
+Then run `run_workflow.py --pytom-pick` with `pytom` active and everything else
+with `cryoet` active.
+</details>
+
+**Running the analysis on a laptop instead?** `analyze.py` and `dashboard.py`
+need no GPU and no cryo-ET software. Copy the small result tables down and use a
+plain venv:
 
 ```bash
-conda create -n warp warp -c warpem -c nvidia/label/cuda-11.8.0 -c pytorch -c conda-forge -y
-conda activate warp && WarpTools --version && conda deactivate
+python3 -m venv ~/venvs/cryoet && source ~/venvs/cryoet/bin/activate
+pip install -r requirements.txt
 ```
 
-**2 — IMOD**, which provides `etomo`
-([docs](https://bio3d.colorado.edu/imod/)). Warp's `ts_etomo_patches` shells out
-to it, so it must be on `PATH` inside the warp environment.
+### 2.6 IMOD and AreTomo2
+
+These two are ordinary binaries rather than conda packages.
+
+**IMOD** provides `etomo` and `tiltalign`; Warp's `ts_etomo_patches` shells out
+to it. Installing system-wide puts it on `PATH` inside the conda environment.
+~200 MB. ([downloads](https://bio3d.colorado.edu/imod/download.html))
 
 ```bash
-# Check https://bio3d.colorado.edu/imod/download.html for the current filename
-cd /tmp && wget https://bio3d.colorado.edu/imod/AMD64-RHEL5/imod_5.1.1_RHEL8-64_CUDA12.0.sh
-sudo sh imod_5.1.1_RHEL8-64_CUDA12.0.sh -yes
-source /etc/profile.d/IMOD.sh    # add this line to ~/.bashrc
-tiltalign -h | head -1
+cd /tmp
+sudo apt-get install -y ca-certificates && sudo update-ca-certificates
+wget https://bio3d.colorado.edu/imod/AMD64-RHEL5/imod_5.1.12_RHEL8-64_CUDA12.0.sh
+
+# Verify before running it with sudo (see note below)
+sha256sum imod_5.1.12_RHEL8-64_CUDA12.0.sh
+# expected: 1cb30013c74f34a33313909cbaf293fb50fb07fa3cff71f2dec52d7b948c4da9
+
+sudo sh imod_5.1.12_RHEL8-64_CUDA12.0.sh -yes
+
+# The installer writes IMOD-linux.sh (not IMOD.sh) into /etc/profile.d
+source /etc/profile.d/IMOD-linux.sh
+echo 'source /etc/profile.d/IMOD-linux.sh' >> ~/.bashrc
+
+tiltalign -h 2>&1 | head -2
 ```
 
-**3 — AreTomo2** ([repo](https://github.com/czimaginginstitute/AreTomo2)).
-Grab the newest release binary — as of writing that is **v1.1.2**; do not
-hard-code a URL from an older guide, several point at releases that no longer
-exist.
+IMOD's startup script prepends its own `bin` and `lib` to `PATH` and
+`LD_LIBRARY_PATH`, including a `python` shim pointing at the system interpreter.
+Confirm it has not shadowed the conda environment:
+
+```bash
+which python WarpTools tiltalign
+# python and WarpTools must resolve inside ~/miniforge3/envs/cryoet/
+# tiltalign must resolve inside /usr/local/IMOD/
+```
+
+If `python` now points at `/usr/local/IMOD/...`, re-run `conda activate cryoet`;
+activating after sourcing IMOD puts the environment back in front.
+
+<details>
+<summary><b>If wget reports "The certificate of 'bio3d.colorado.edu' is not trusted"</b></summary>
+
+The IMOD server presents an incomplete certificate chain — it sends its leaf and
+the Sectigo intermediate, but verification still fails with
+`unable to verify the first certificate`. This is a server-side problem, not
+yours. Refreshing `ca-certificates` (in the command above) fixes it on some
+images. To see what is actually happening:
+
+```bash
+echo | openssl s_client -connect bio3d.colorado.edu:443 \
+  -servername bio3d.colorado.edu 2>&1 | grep -E "Verify return code|^ *[0-9] [si]:"
+```
+
+If it still will not verify, download without the check **and then verify the
+file by hash instead** — you are about to run this with `sudo`, so do not skip
+the second step:
+
+```bash
+wget --no-check-certificate \
+  https://bio3d.colorado.edu/imod/AMD64-RHEL5/imod_5.1.12_RHEL8-64_CUDA12.0.sh
+
+sha256sum imod_5.1.12_RHEL8-64_CUDA12.0.sh
+# must be: 1cb30013c74f34a33313909cbaf293fb50fb07fa3cff71f2dec52d7b948c4da9
+# size    : 201347866 bytes
+# starts  : "#!/bin/sh" then "# Stub for self-extracting IMOD installer"
+```
+
+The hash above was computed from an independent download over a separate network
+path, so matching it rules out interference on yours. IMOD publishes no checksums
+of its own — `.md5`, `.sha256` and `MD5SUMS` all return 404 — so this is the best
+available check. **If the hash does not match, stop.**
+</details>
+
+IMOD is not available through conda. The `imod` package on conda-forge is
+unrelated — it is a groundwater-modelling library from Deltares that happens to
+share the name.
+
+The **RHEL8** build is correct on Debian. IMOD publishes no Debian or Ubuntu
+package — only RHEL7 and RHEL8 — and the RHEL8 build is compiled against
+glibc 2.28, so it runs on anything newer.
+
+**AreTomo2.** 6 MB.
+([releases](https://github.com/czimaginginstitute/AreTomo2/releases))
 
 ```bash
 mkdir -p ~/opt/aretomo2 && cd ~/opt/aretomo2
-# Copy the current asset URL from https://github.com/czimaginginstitute/AreTomo2/releases
-wget <AreTomo2_1.1.2_Cuda118_*.zip>
-unzip -o AreTomo2_*.zip && chmod +x AreTomo2*
-ln -sf ~/opt/aretomo2/AreTomo2* ~/opt/aretomo2/AreTomo2
-echo 'export PATH=$HOME/opt/aretomo2:$PATH' >> ~/.bashrc && source ~/.bashrc
-AreTomo2 | head -3
+wget https://github.com/czimaginginstitute/AreTomo2/releases/download/v1.1.2/AreTomo2_1.1.2_03-27-2024.zip
+unzip -o AreTomo2_1.1.2_03-27-2024.zip
+chmod +x AreTomo2_*
+
+# The zip holds Cuda118, Cuda120 and Cuda121 builds. Warp invokes the plain name
+# "AreTomo2", so symlink the CUDA 12 build to it.
+ln -sf ~/opt/aretomo2/AreTomo2_1.1.2_Cuda121 ~/opt/aretomo2/AreTomo2
+
+echo 'export PATH=$HOME/opt/aretomo2:$PATH' >> ~/.bashrc
+source ~/.bashrc
+
+conda activate cryoet
+AreTomo2 2>&1 | head -3         # usage banner
 ```
 
-**4 — PyTom** ([repo](https://github.com/SBC-Utrecht/pytom-match-pick))
+**AreTomo2 needs `LD_LIBRARY_PATH` pointing into the environment.** It links
+against `libcudart.so.12` and `libcufft.so.11`, which conda installs into
+`$CONDA_PREFIX/lib` — but conda does not put that directory on
+`LD_LIBRARY_PATH`. Python and .NET find their libraries through RPATH, so
+nothing else in the stack notices; a bare binary like AreTomo2 fails with
+`error while loading shared libraries`.
+
+Set it once, as an activation hook, so it applies whenever the environment is
+active and is inherited by anything Warp launches:
 
 ```bash
-conda create -n pytom -c conda-forge python=3.11 cupy cuda-version=11.8 -y
-conda activate pytom
-python -m pip install "pytom-match-pick[plotting]" starfile
-pytom_match_template.py --version
-conda deactivate
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
+cat > "$CONDA_PREFIX/etc/conda/activate.d/zz-ld-library-path.sh" <<'EOF'
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+EOF
+
+conda deactivate && conda activate cryoet
+AreTomo2 2>&1 | head -3         # now prints its usage banner
 ```
 
-### 2.5 Verify, then download
+This matters beyond the check: `ts_aretomo` runs AreTomo2 as a subprocess, so
+without it the whole AreTomo branch of Task 1 fails part-way through.
+
+**Pick the CUDA 12 build, not Cuda118.** AreTomo2 bundles no CUDA runtime; it
+borrows the one in whatever environment Warp launches it from:
+
+| build | needs | present in `cryoet`? |
+|---|---|---|
+| `Cuda118` | `libcudart.so.11.0`, `libcufft.so.10` | no |
+| `Cuda120` / `Cuda121` | `libcudart.so.12`, `libcufft.so.11` | **yes** |
+
+Pick wrong and it fails at run time with `error while loading shared libraries`,
+even though the install looks perfect. That is also why the test above activates
+the environment first — from a bare shell AreTomo2 cannot start at all. Beyond
+CUDA it needs only glibc 2.27, so it runs on anything modern.
+
+### 2.7 Verify, then download
+
+Run this with `cryoet` active — AreTomo2 and WarpTools need its CUDA runtime to
+start, so a check from any other shell reports them broken.
 
 ```bash
-source ~/venvs/cryoet/bin/activate
-python setup_data.py --check        # software inventory + GPU check
+conda activate cryoet
+cd ~/cryo
+python setup_data.py --check
+```
+
+Every line must read `OK`. The versions found are written to
+`results/tables/software_versions.csv` and appear in the report and dashboard, so
+the inventory is part of the deliverable. Only once it is clean:
+
+```bash
 python setup_data.py --download     # ~13 GB, resumable
 ```
 
@@ -326,36 +518,29 @@ export CRYOET_DATA_DIR=/mnt/disks/cryoet/empiar10491
 
 ## Part 4 — Running it
 
-Three environments, activated in order. Each is used once, then you move on.
+One environment, start to finish.
 
 ```bash
-cd ~/cryoet_comparison
+conda activate cryoet
+cd ~/cryo
 
-# ---- environment C: check the machine, then pull the data -------------------
-source ~/venvs/cryoet/bin/activate
-python setup_data.py --check          # software inventory + GPU check
-python setup_data.py --download       # ~13 GB from EMBL-EBI, resumable
-deactivate
+python setup_data.py --check           # software inventory + GPU check
+python setup_data.py --download        # ~13 GB from EMBL-EBI, resumable
 
-# ---- environment A: everything Warp does ------------------------------------
-conda activate warp
 python run_workflow.py --preprocess    # motion + CTF + tilt-series grouping (once)
 python run_workflow.py --align         # BOTH alignment branches
 python run_workflow.py --reconstruct   # defocus handedness, CTF, tomograms
 python run_workflow.py --warp-pick     # Warp template matching, both branches
-conda deactivate
+python run_workflow.py --pytom-pick    # PyTom template matching
+python run_workflow.py --collect       # write the tidy CSV tables (no GPU)
 
-# ---- environment B: the PyTom step ------------------------------------------
-conda activate pytom
-python run_workflow.py --pytom-pick
-conda deactivate
-
-# ---- environment C again: analysis, no GPU ----------------------------------
-source ~/venvs/cryoet/bin/activate
-python run_workflow.py --collect       # write the tidy CSV tables
 python analyze.py                      # statistics, plots, conclusions
 streamlit run dashboard.py --server.port 8501
 ```
+
+`--all` runs every stage in order if you would rather not step through them.
+Each stage skips work whose output already exists, so you can stop and resume at
+any point.
 
 To see the dashboard from your laptop, tunnel to it rather than opening a
 firewall port:
@@ -368,12 +553,8 @@ gcloud compute ssh cryoet --zone=us-central1-a -- -L 8501:localhost:8501
 Or copy the results down — they are small — and run the dashboard locally:
 
 ```bash
-gcloud compute scp --recurse cryoet:~/cryoet_comparison/results ./cryoet_comparison/ --zone=us-central1-a
+gcloud compute scp --recurse cryoet:~/cryo/results ./cryoet_comparison/ --zone=us-central1-a
 ```
-
-Each stage skips work whose output already exists, so you can stop and resume at
-any point. `--all` runs every stage in order, useful only if one environment
-happens to have everything.
 
 ### How long does it take?
 
