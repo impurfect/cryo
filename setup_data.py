@@ -106,6 +106,38 @@ def check_tool(name, executable, version_cmd, version_regex=None):
     return {"tool": name, "found": True, "path": path, "version": version[:200]}
 
 
+def check_aretomo():
+    """AreTomo2 needs its own check, because it has no --version flag.
+
+    Run with no arguments it starts up, discovers there is no input file, prints
+    "Error: unable to open MRC file" and exits. That failure is the success
+    signal we want: reaching it proves the binary loaded libcudart and libcufft.
+    The only outcome that means trouble is a linker error before that point.
+
+    For the version we resolve the symlink and report the real filename, e.g.
+    AreTomo2_1.1.2_Cuda121. That records the CUDA build as well as the release -
+    and the CUDA build is the thing most likely to be wrong, since a Cuda118
+    binary cannot run against the CUDA 12 libraries in this environment.
+    """
+    path = shutil.which("AreTomo2")
+    if path is None:
+        return {"tool": "AreTomo2", "found": False, "path": "",
+                "version": "NOT FOUND"}
+
+    real = Path(path).resolve().name
+    _, out = _run("AreTomo2")
+
+    if "error while loading shared libraries" in out or "cannot open shared object" in out:
+        missing = re.search(r"(lib[\w.+-]+\.so[\w.]*)", out)
+        return {"tool": "AreTomo2", "found": False, "path": path,
+                "version": f"INSTALLED BUT CANNOT RUN - missing "
+                           f"{missing.group(1) if missing else 'a shared library'}. "
+                           f"The library is almost certainly in $CONDA_PREFIX/lib "
+                           f"but not on LD_LIBRARY_PATH - see README 2.6."}
+
+    return {"tool": "AreTomo2", "found": True, "path": path, "version": real}
+
+
 def check_gpu():
     """Confirm an NVIDIA GPU is visible and report its name and memory.
 
@@ -131,15 +163,22 @@ def software_inventory():
         # version either way.
         check_tool("WarpTools", "WarpTools", "WarpTools --help",
                    r"Version\s+[\d.]+\S*"),
-        check_tool("AreTomo2", "AreTomo2", "AreTomo2",
-                   r"AreTomo2\s+[\d.]+"),
-        check_tool("IMOD (etomo)", "etomo", "imodinfo -h",
+        check_aretomo(),
+        # tiltxcorr and tiltalign are the two IMOD programs patch tracking
+        # actually runs, and both print a proper version banner. "etomo" itself
+        # is the GUI wrapper - we only confirm it exists, and read the version
+        # from IMOD's own VERSION file rather than from -h output.
+        check_tool("IMOD (etomo)", "etomo", 'cat "$IMOD_DIR/VERSION"',
+                   r"[\d]+\.[\d.]+"),
+        check_tool("IMOD (tiltxcorr)", "tiltxcorr", "tiltxcorr -h",
                    r"[Vv]ersion\s+[\d.]+\S*"),
         check_tool("IMOD (tiltalign)", "tiltalign", "tiltalign -h",
                    r"[Vv]ersion\s+[\d.]+\S*"),
+        # --help does not carry the package version; ask the package metadata.
         check_tool("PyTom match", "pytom_match_template.py",
-                   "pytom_match_template.py --help",
-                   r"pytom[_-]match[_-]pick\s+[\d.]+"),
+                   'python -c "import importlib.metadata as m; '
+                   'print(\'pytom-match-pick\', m.version(\'pytom-match-pick\'))"',
+                   r"pytom-match-pick\s+[\d.]+\S*"),
     ]
 
 
