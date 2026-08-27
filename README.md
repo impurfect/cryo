@@ -1,6 +1,6 @@
 # Cryo-ET workflow comparison — St. Jude technical assessment
 
-[`Background`](https://claude.ai/code/artifact/20a34c73-4009-4834-ae57-0bdb29a0a0fa)
+[`Background material`](https://claude.ai/code/artifact/20a34c73-4009-4834-ae57-0bdb29a0a0fa)
 
 
 Comparing two **tilt-series alignment** methods and two **particle-picking**
