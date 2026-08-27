@@ -1,4 +1,4 @@
-# Cryo-ET workflow comparison — St. Jude technical assessment
+# Cryo-ET workflow comparison
 
 [`Background material`](https://claude.ai/code/artifact/20a34c73-4009-4834-ae57-0bdb29a0a0fa)
 
