@@ -242,6 +242,28 @@ def check_disk_space(need_gb=45):
     return True
 
 
+def movies_from_mdocs():
+    """Read the .mdoc files and return the exact set of movie filenames needed.
+
+    An .mdoc is a plain text file with one block per tilt image. The line we
+    care about looks like:
+
+        SubFramePath = X:\\some\\windows\\path\\2Dvs3D_53-1_00001_-0.0_Jul31_10.36.03.tif
+
+    The path is whatever the microscope computer called it, so we keep only the
+    basename. Between them the five .mdoc files name every movie this project
+    needs and nothing else - which makes them the authoritative list for both
+    downloading and for checking the download afterwards.
+    """
+    wanted = set()
+    for mdoc in sorted(config.MDOC_DIR.glob("*.mdoc")):
+        for line in mdoc.read_text(errors="ignore").splitlines():
+            if line.strip().startswith("SubFramePath"):
+                raw = line.split("=", 1)[1].strip()
+                wanted.add(raw.replace("\\", "/").rsplit("/", 1)[-1])
+    return wanted
+
+
 def download_raw_data():
     """Fetch the EMPIAR-10491 tilt series: gain reference, metadata, movies.
 
@@ -253,12 +275,20 @@ def download_raw_data():
       TS_*.mrc.mdoc  one small text file per tilt series. It lists, for every
                      image in the series, which movie file it is, what angle the
                      stage was at, and when it was taken. This is the metadata
-                     that turns 205 unrelated movies into 5 ordered tilt series.
+                     that turns unrelated movies into ordered tilt series.
 
-      *.tif          the movies themselves. Each one is a short burst of frames
-                     of the same view; averaging them (after correcting for
-                     drift) gives one image of the specimen at one tilt angle.
-                     There are 41 of these per tilt series.
+      *.tif          the movies themselves. Each is a short burst of frames of
+                     the same view; averaging them (after correcting for drift)
+                     gives one image of the specimen at one tilt angle. There are
+                     41 per tilt series.
+
+    We fetch the .mdoc files FIRST and then download exactly the movies they
+    name. The obvious alternative - a wildcard like "*-11_*.tif", which is what
+    the official tutorial script uses - is ambiguous: this deposit contains both
+    a "53-11" and a "59-11" series, so that pattern quietly pulls down two tilt
+    series where you wanted one. Harmless, because Warp only ever processes what
+    the .mdoc files reference, but it wastes bandwidth and disk and it makes
+    "did the download finish?" impossible to answer honestly.
     """
     print(f"\nDownloading EMPIAR-{config.EMPIAR_ACCESSION} into {config.DATA_DIR}")
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -266,16 +296,30 @@ def download_raw_data():
     print("\n[1/3] gain reference")
     _wget(f"{config.EMPIAR_FTP}/{config.GAIN_FILE}", config.DATA_DIR)
 
+    print("\n[2/3] tilt-series metadata (.mdoc)")
     for n in config.SERIES_NUMBERS:
-        print(f"\n[2/3] TS_{n} metadata (.mdoc)")
         _wget(f"{config.EMPIAR_FTP}/tiltseries/mdoc/TS_{n}.mrc.mdoc",
               config.MDOC_DIR, quiet=True)
 
-        print(f"[3/3] TS_{n} movies (.tif) - this is the slow part")
-        # The movie filenames embed the series number as "-<n>_", e.g.
-        # 2Dvs3D_53-11_00007_8.0_Jul31_16.54.59.tif belongs to TS_11.
-        _wget(f"{config.EMPIAR_FTP}/tiltseries/data/*-{n}_*.tif",
-              config.FRAMES_DIR)
+    wanted = movies_from_mdocs()
+    if not wanted:
+        print("  Could not read any movie names from the .mdoc files - stopping "
+              "rather than guessing at a wildcard.")
+        return
+    print(f"\n[3/3] {len(wanted)} movies named by the .mdoc files "
+          f"- this is the slow part")
+
+    # One wget invocation over a URL list, so the connection is reused and -N
+    # skips anything already on disk.
+    config.FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+    url_list = config.DATA_DIR / "_movie_urls.txt"
+    url_list.write_text("\n".join(
+        f"{config.EMPIAR_FTP}/tiltseries/data/{name}" for name in sorted(wanted)
+    ) + "\n")
+    subprocess.run(["wget", "-N", "--no-directories", "--show-progress",
+                    "--directory-prefix", str(config.FRAMES_DIR),
+                    "-i", str(url_list)])
+    url_list.unlink(missing_ok=True)
 
 
 def download_template():
@@ -304,16 +348,36 @@ def download_template():
 
 
 def report_data_status():
-    """Count what is on disk and flag anything obviously incomplete."""
-    n_frames = len(list(config.FRAMES_DIR.glob("*.tif"))) if config.FRAMES_DIR.exists() else 0
+    """Count what is on disk and say plainly whether anything is missing.
+
+    Completeness is judged against the movies the .mdoc files actually name, not
+    against a hard-coded number. Extra files in the frames directory are fine -
+    a wildcard download will leave some - so they are reported but never treated
+    as a problem.
+    """
     n_mdoc = len(list(config.MDOC_DIR.glob("*.mdoc"))) if config.MDOC_DIR.exists() else 0
-    expected_frames = 41 * len(config.SERIES_NUMBERS)   # 41 tilts x 5 series
+    on_disk = {f.name for f in config.FRAMES_DIR.glob("*.tif")} \
+        if config.FRAMES_DIR.exists() else set()
+    wanted = movies_from_mdocs() if n_mdoc else set()
+    missing = wanted - on_disk
+    extra = on_disk - wanted
 
     print("\n--- data status " + "-" * 57)
     print(f"  data directory : {config.DATA_DIR}")
     print(f"  gain reference : {'present' if config.GAIN_PATH.exists() else 'MISSING'}")
     print(f"  mdoc files     : {n_mdoc} / {len(config.SERIES_NUMBERS)}")
-    print(f"  movie files    : {n_frames} / {expected_frames} expected")
+    if wanted:
+        print(f"  movies needed  : {len(wanted) - len(missing)} / {len(wanted)} "
+              f"(from the .mdoc files)")
+        if missing:
+            sample = ", ".join(sorted(missing)[:3])
+            print(f"    still missing: {sample}"
+                  f"{' ...' if len(missing) > 3 else ''}")
+    else:
+        print(f"  movies needed  : unknown until the .mdoc files are downloaded")
+    if extra:
+        print(f"  extra movies   : {len(extra)} not referenced by any .mdoc "
+              f"(harmless; Warp ignores them)")
     print(f"  template map   : {'present' if config.TEMPLATE_MAP.exists() else 'MISSING'}")
     if config.DATA_DIR.exists():
         code, out = _run(f"du -sh {config.DATA_DIR}")
@@ -324,7 +388,7 @@ def report_data_status():
     print("-" * 72)
 
     ok = (config.GAIN_PATH.exists() and n_mdoc == len(config.SERIES_NUMBERS)
-          and n_frames == expected_frames and config.TEMPLATE_MAP.exists())
+          and bool(wanted) and not missing and config.TEMPLATE_MAP.exists())
     print("  Data complete." if ok else
           "  Data incomplete - re-run with --download (it resumes safely).")
     return ok
