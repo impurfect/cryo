@@ -1,0 +1,19 @@
+# Analysis + dashboard environment (Python 3.11).
+#
+# This is ONLY for reading result tables, doing statistics, plotting and serving
+# the dashboard. It contains none of the cryo-ET software - WarpTools, AreTomo2,
+# PyTom and IMOD are installed separately (see README.md), because they are GPU
+# binaries and conda packages, not pip packages.
+#
+# Lower bounds rather than exact pins: these are stable, widely-used libraries
+# and the code uses only long-settled APIs. Versions actually used to produce
+# the checked-in results are recorded in results/tables/software_versions.csv
+# and printed by `pip freeze`.
+
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11          # linear_sum_assignment, wilcoxon, mannwhitneyu, spearmanr
+matplotlib>=3.8
+mrcfile>=1.4         # read tomogram headers and voxel data
+starfile>=0.5        # read the STAR files Warp and PyTom write
+streamlit>=1.30      # the dashboard
