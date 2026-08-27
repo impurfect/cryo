@@ -1,6 +1,4 @@
-# Cryo-ET workflow comparison 
-
-[`Background document`](https://claude.ai/code/artifact/20a34c73-4009-4834-ae57-0bdb29a0a0fa)
+# Cryo-ET workflow comparison — St. Jude technical assessment
 
 Comparing two **tilt-series alignment** methods and two **particle-picking**
 methods on the official Warp tilt-series tutorial dataset, with a reproducible
@@ -220,16 +218,24 @@ sudo reboot
 
 ```bash
 sudo apt-get install -y build-essential wget curl unzip git python3-venv \
+                        default-jre \
                         libgl1 libglu1-mesa libx11-6 libxext6 libxt6 libsm6 libice6
 ```
 
-The X and GL libraries are for IMOD, which links against them even for its
-command-line programs. You will not use its GUI on a headless VM, but it will not
-start without them.
+Two of these are for IMOD and are easy to miss:
 
-*RHEL family:* `sudo dnf install -y gcc gcc-c++ make wget curl unzip git libGL
-libGLU libX11 libXext libXt mesa-libGL` — and no `python3-venv` equivalent is
-needed, since `venv` ships inside the `python3` package there.
+* **`default-jre`** — `etomo` is a Java program, and `batchruntomo` shells out to
+  it during patch tracking. Without a JRE, Task 1's IMOD branch fails on every
+  tilt series with `no java runtime in the current search path`, and it fails
+  *after* Warp has spent time building the tilt stacks.
+* **The X and GL libraries** — IMOD links against them even for its command-line
+  programs. You will not use its GUI on a headless VM, but it will not start
+  without them.
+
+*RHEL family:* `sudo dnf install -y gcc gcc-c++ make wget curl unzip git
+java-17-openjdk-headless libGL libGLU libX11 libXext libXt mesa-libGL` — and no
+`python3-venv` equivalent is needed, since `venv` ships inside the `python3`
+package there.
 
 ### 2.4 The code
 
