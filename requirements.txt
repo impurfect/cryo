@@ -15,5 +15,8 @@ pandas>=2.0
 scipy>=1.11          # linear_sum_assignment, wilcoxon, mannwhitneyu, spearmanr
 matplotlib>=3.8
 mrcfile>=1.4         # read tomogram headers and voxel data
-starfile>=0.5        # read the STAR files Warp and PyTom write
+starfile>=0.5.13     # read the STAR files Warp and PyTom write.
+                     # 0.5.13+ is REQUIRED with pandas 3.x: earlier releases call
+                     # pd.read_csv(delim_whitespace=...), which pandas 3 removed.
+                     # conda-forge still ships 0.5.2, so install this one with pip.
 streamlit>=1.30      # the dashboard

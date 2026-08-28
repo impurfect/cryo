@@ -659,11 +659,22 @@ def stage_pytom_pick():
               "    PYTOM_INVERT_TEMPLATE = True in config.py and re-run.")
 
     # --- 2. mask -----------------------------------------------------------
-    if not mask.exists():
-        # The box must be large enough to hold the molecule plus a margin; a
-        # box of 2.5x the particle diameter (rounded to an even number) is the
-        # usual rule of thumb.
-        box = int(round(2.5 * config.TEMPLATE_DIAMETER_A / config.TOMO_ANGPIX / 2) * 2)
+    # PyTom requires the mask and the template to have EXACTLY the same box size,
+    # and it derives the template's box from the dimensions of the input EMDB
+    # map - not from any formula we might apply. So read the box that was
+    # actually produced rather than predicting it.
+    import mrcfile
+    with mrcfile.open(template, permissive=True) as m:
+        box = int(m.data.shape[0])
+
+    mask_box = None
+    if mask.exists():
+        with mrcfile.open(mask, permissive=True) as m:
+            mask_box = int(m.data.shape[0])
+    if mask_box != box:
+        if mask_box is not None:
+            print(f"    mask is {mask_box}^3 but the template is {box}^3 "
+                  f"- rebuilding it")
         radius_voxels = config.TEMPLATE_RADIUS_A / config.TOMO_ANGPIX
         run(["pytom_create_mask.py",
              "-b", box,
@@ -690,15 +701,17 @@ def stage_pytom_pick():
 
         job_json = find_job()
         if job_json is None:
+            # Options common to both routes. Voxel size, tilt angles, dose and
+            # per-tilt weighting are deliberately NOT here: the Warp XML supplies
+            # all of them, and PyTom warns and ignores them if passed alongside
+            # it. They are added only on the fallback path below.
             cmd = ["pytom_match_template.py",
                    "-t", template, "-m", mask, "-v", tomo,
                    "-d", config.PYTOM_DIR,
                    "--particle-diameter", config.TEMPLATE_DIAMETER_A,
                    "--angular-search", config.ANGULAR_STEP_DEG,
                    "--z-axis-rotational-symmetry", config.PYTOM_Z_SYMMETRY,
-                   "--voxel-size-angstrom", config.TOMO_ANGPIX,
                    "--low-pass", config.PYTOM_LOW_PASS_A,
-                   "--per-tilt-weighting",
                    "--spectral-whitening",
                    "--random-phase-correction",
                    "-g", *[str(g) for g in config.GPU_IDS]]
@@ -717,7 +730,9 @@ def stage_pytom_pick():
                 print("    --warp-xml-file route did not produce a job file; "
                       "falling back to explicit tilt/dose files")
                 tlt, dose = _write_tilt_and_dose_files(name)
-                secs, _ = run(cmd + ["--tilt-angles", tlt,
+                secs, _ = run(cmd + ["--voxel-size-angstrom", config.TOMO_ANGPIX,
+                                     "--per-tilt-weighting",
+                                     "--tilt-angles", tlt,
                                      "--dose-accumulation", dose],
                               f"pytom_match_{name}_fallback")
                 job_json = find_job()

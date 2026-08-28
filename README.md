@@ -1,6 +1,4 @@
-# Cryo-ET workflow comparison 
-
-[`Background document`](https://claude.ai/code/artifact/20a34c73-4009-4834-ae57-0bdb29a0a0fa)
+# Cryo-ET workflow comparison — St. Jude technical assessment
 
 Comparing two **tilt-series alignment** methods and two **particle-picking**
 methods on the official Warp tilt-series tutorial dataset, with a reproducible
@@ -279,7 +277,7 @@ Check the solve before committing to it (fast, changes nothing):
 conda create -n cryoet --dry-run \
   -c warpem -c pytorch -c conda-forge \
   warp=2.0.0 cupy "cuda-version=12.9" \
-  numpy pandas scipy matplotlib mrcfile starfile streamlit
+  numpy pandas scipy matplotlib mrcfile streamlit
 ```
 
 If it resolves, drop `--dry-run` and add `-y`. A few GB, 10-20 minutes.
@@ -288,10 +286,10 @@ If it resolves, drop `--dry-run` and add `-y`. A few GB, 10-20 minutes.
 conda create -n cryoet -y \
   -c warpem -c pytorch -c conda-forge \
   warp=2.0.0 cupy "cuda-version=12.9" \
-  numpy pandas scipy matplotlib mrcfile starfile streamlit
+  numpy pandas scipy matplotlib mrcfile streamlit
 
 conda activate cryoet
-python -m pip install "pytom-match-pick[plotting]"
+python -m pip install "pytom-match-pick[plotting]" "starfile>=0.5.13"
 
 WarpTools --help | head -3          # banner should read "Version 2.0.0"
 pytom_match_template.py --help | head -3
@@ -312,6 +310,14 @@ conda list warp                      # the exact build, e.g. 2.0.0dev40
 Everything after this runs with `cryoet` active. There is no environment
 switching anywhere in the workflow.
 
+> **Why `starfile` comes from pip, not conda.** conda-forge still ships 0.5.2,
+> which calls `pd.read_csv(delim_whitespace=...)` — an argument pandas 3 removed.
+> Every STAR file this project reads would fail with `TypeError: read_csv() got
+> an unexpected keyword argument 'delim_whitespace'`. PyPI's 0.5.13 uses
+> `delimiter=r'\s+'` instead. If you already built the environment with the
+> conda version, `python -m pip install -U "starfile>=0.5.13"` fixes it in
+> place.
+
 <details>
 <summary><b>If the solver cannot satisfy everything at once</b></summary>
 
@@ -320,7 +326,7 @@ could conflict:
 
 ```bash
 conda create -n pytom -c conda-forge python=3.11 cupy "cuda-version=12" -y
-conda activate pytom && python -m pip install "pytom-match-pick[plotting]" starfile
+conda activate pytom && python -m pip install "pytom-match-pick[plotting]" "starfile>=0.5.13"
 ```
 
 Then run `run_workflow.py --pytom-pick` with `pytom` active and everything else
