@@ -1,4 +1,6 @@
-# Cryo-ET workflow comparison — St. Jude technical assessment
+# Cryo-ET workflow comparison
+
+[`Background document`](https://claude.ai/code/artifact/20a34c73-4009-4834-ae57-0bdb29a0a0fa)
 
 Comparing two **tilt-series alignment** methods and two **particle-picking**
 methods on the official Warp tilt-series tutorial dataset, with a reproducible
