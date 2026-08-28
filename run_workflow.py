@@ -590,7 +590,7 @@ def stage_warp_pick():
                        "--input_processing", proc_dir,
                        "--in_suffix", config.TEMPLATE_EMDB_ID,
                        "--out_suffix", "clean",
-                       "--minimum", config.PICK_THRESHOLD_SIGMA,
+                       "--minimum", config.EXTRACT_THRESHOLD_SIGMA,
                        label=f"threshold_picks_{branch}")
         append_runtime("peak_extraction", f"warp_{branch}", secs,
                        len(config.TILT_SERIES))
@@ -773,14 +773,51 @@ def stage_pytom_pick():
         secs, _ = run([extract_exe,
                        "-j", job_json,
                        "-n", config.PYTOM_MAX_PARTICLES,
+                       "--number-of-false-positives", config.PYTOM_FALSE_POSITIVES,
                        "--particle-diameter", config.TEMPLATE_DIAMETER_A],
                       f"pytom_extract_{name}")
         total_extract += secs
         per_tomo.append(name)
 
+        # Extraction writes a STAR file whether or not it found anything, and
+        # exits 0 either way. An empty one means the search found no peak above
+        # PyTom's own false-alarm cutoff - which is a real failure, and one worth
+        # stopping on rather than discovering in the analysis three stages later.
+        found = _count_star_rows(config.PYTOM_DIR, tomo.stem)
+        if found == 0:
+            sys.exit(
+                f"\nPyTom extracted 0 particles from {name}.\n"
+                f"  The search ran, but no peak cleared its false-alarm cutoff.\n"
+                f"  Check, in this order:\n"
+                f"    1. template scale - the box should be a few times the\n"
+                f"       particle: {config.TEMPLATE_DIAMETER_A:.0f} A is "
+                f"{config.TEMPLATE_DIAMETER_A / config.TOMO_ANGPIX:.0f} voxels here\n"
+                f"    2. contrast - compare the skew of "
+                f"{config.PYTOM_DIR}/template_10A.mrc\n"
+                f"       against a tomogram; the signs must match, else set\n"
+                f"       PYTOM_INVERT_TEMPLATE = True in config.py\n"
+                f"    3. signal - in {name}_scores.mrc, (max-mean)/std must "
+                f"exceed\n"
+                f"       sqrt(2*ln(n_voxels)), about 5.6 for these volumes;\n"
+                f"       at or below that, the peaks ARE the noise\n")
+        print(f"    {found} particles")
+
     append_runtime("template_matching", "pytom", total_search, len(per_tomo),
                    "sum over tomograms, one GPU")
     append_runtime("peak_extraction", "pytom", total_extract, len(per_tomo))
+
+
+def _count_star_rows(directory, stem):
+    """Count data rows in the STAR file PyTom wrote for one tomogram."""
+    hits = sorted(Path(directory).glob(f"{stem}*particles.star"))
+    if not hits:
+        return 0
+    n = 0
+    for line in hits[0].read_text(errors="ignore").splitlines():
+        line = line.strip()
+        if line and (line[0].isdigit() or line[0] == "-"):
+            n += 1
+    return n
 
 
 def _pytom_extract_executable():

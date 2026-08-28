@@ -175,17 +175,46 @@ TEMPLATE_VOXEL_SIZE_A = None
 WARP_SUBDIVISIONS = 3
 ANGULAR_STEP_DEG = 7.5
 
-# How confident a peak must be to count as a particle.
-# Warp normalises its correlation scores so that the value is "how many standard
-# deviations above the background noise this peak is". A value of 5 means
-# 5 sigma. The tutorial page uses 3 (permissive) and the end-to-end script uses
-# 6 (strict); 5 is a middle setting. analyze.py also reports how the results
-# change if you move this, so the conclusion does not hinge on the exact number.
-PICK_THRESHOLD_SIGMA = 5.0
+# --- two thresholds, on purpose -------------------------------------------
+#
+# EXTRACT is how permissive we are when writing particles to disk. ANALYSE is
+# the cutoff the comparison actually applies. They are separate because
+# extraction is destructive: a particle not written out cannot be recovered
+# without redoing an hour of matching, whereas raising a cutoff during analysis
+# costs nothing. So extract generously and decide later.
+#
+# Warp normalises its correlation scores to "standard deviations above this
+# volume's background", so these numbers are in sigma. The tutorial page uses 3
+# and the end-to-end script uses 6.
+EXTRACT_THRESHOLD_SIGMA = 3.0
+
+# Where the analysis draws the line, and why 4.5.
+#
+# The tempting calculation is: a correlation volume holds 12.9 million voxels,
+# so the largest value pure noise would produce is sqrt(2*ln(12.9e6)) = 5.7
+# sigma, and anything below that is noise. That is WRONG here, because it
+# assumes every voxel is an independent sample. A correlation volume is smooth -
+# neighbouring voxels are strongly correlated - so the effective number of
+# independent samples is closer to (volume / particle volume) = about 11,000,
+# giving a realistic noise ceiling of sqrt(2*ln(11185)) = 4.3 sigma.
+#
+# 4.5 sits just above that. analyze.py also plots yield against cutoff from 3 to
+# 12, so a reader can see immediately whether any conclusion depends on it.
+PICK_THRESHOLD_SIGMA = 4.5
 
 # Maximum number of particles PyTom is allowed to extract per tomogram.
 # Set generously so that PyTom is not the one truncating the comparison.
 PYTOM_MAX_PARTICLES = 1500
+
+# How many false positives PyTom should tolerate when it picks its own cutoff.
+# PyTom does not take a sigma threshold; it estimates a cutoff from an extreme-
+# value model of the background, targeting this many spurious detections per
+# tomogram. The default of 1 is very strict - on this data it chose a cutoff
+# above every peak in the volume and extracted nothing at all. 100 is the
+# matching decision to EXTRACT_THRESHOLD_SIGMA above: let plausible candidates
+# through, then let the analysis decide. The false-positive rate is a property
+# of the extraction, not a claim about the particles.
+PYTOM_FALSE_POSITIVES = 100
 
 # Apoferritin's octahedral symmetry contains a 4-fold rotation axis. PyTom can
 # only exploit symmetry about the z axis, and EMD-15854 is deposited with its
@@ -268,7 +297,8 @@ def describe() -> str:
         f"Dose         : {DOSE_PER_TILT} e-/A^2 per tilt\n"
         f"Template     : EMD-{TEMPLATE_EMDB_ID}, {TEMPLATE_DIAMETER_A:.0f} A diameter, "
         f"symmetry {TEMPLATE_SYMMETRY}\n"
-        f"Pick cutoff  : {PICK_THRESHOLD_SIGMA} sigma\n"
+        f"Pick cutoff  : extract at {EXTRACT_THRESHOLD_SIGMA} sigma, "
+        f"analyse at {PICK_THRESHOLD_SIGMA} sigma\n"
         f"Match radius : {MATCH_RADIUS_A:.0f} A "
         f"({MATCH_RADIUS_A / TOMO_ANGPIX:.1f} voxels at {TOMO_ANGPIX} A/px)\n"
         f"Half averages: {'yes (tutorial default)' if WRITE_HALF_AVERAGES else 'no (saves ~19 GB; only needed for denoising)'}"
