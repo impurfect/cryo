@@ -84,6 +84,29 @@ FORCE = False
 #  SECTION A - small helpers used by everything below
 # ===========================================================================
 
+def fmt(value):
+    """Render a value for a Warp command line.
+
+    Warp's parser is strict about integer-typed options: give --template_diameter
+    the string "130.0" where it wants "130" and it reports 'defined with a bad
+    format', prints its full help, and **exits zero**. Whole-number floats are
+    therefore written without the decimal point. Genuine fractions, like the
+    -85.6 degree tilt axis, are untouched.
+    """
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+# Warp signals a command-line parse error by printing help and returning success.
+# The exit code cannot be trusted, so we look for its wording instead.
+WARP_PARSE_ERRORS = (
+    "is defined with a bad format",
+    "Required option",
+    "Showing all available options",
+)
+
+
 def run(cmd, label, cwd=None, check=True):
     """Run one external command, print it, time it, and return how long it took.
 
@@ -92,12 +115,12 @@ def run(cmd, label, cwd=None, check=True):
     script issues is echoed to the terminal and, for the timed steps, recorded
     in results/tables/runtimes.csv.
     """
-    printable = " ".join(str(c) for c in cmd)
+    cmd = [fmt(c) for c in cmd]
+    printable = " ".join(cmd)
     print(f"\n>>> [{label}]\n    {printable}\n", flush=True)
 
     start = time.time()
-    proc = subprocess.run([str(c) for c in cmd], cwd=cwd,
-                          capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     elapsed = time.time() - start
 
     # Keep the program's own output next to the data. When something goes wrong
@@ -108,16 +131,31 @@ def run(cmd, label, cwd=None, check=True):
         f"$ {printable}\n\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
     )
 
-    if proc.returncode != 0:
-        print(proc.stdout[-4000:])
-        print(proc.stderr[-4000:])
-        msg = f"[{label}] failed with exit code {proc.returncode}"
+    out = proc.stdout + proc.stderr
+
+    # A rejected argument looks like success from the exit code alone, so check
+    # the text too. Catching it here turns a mystifying failure three stages
+    # later into an obvious one right where it happened.
+    parse_error = any(marker in out for marker in WARP_PARSE_ERRORS)
+
+    if proc.returncode != 0 or parse_error:
+        if parse_error:
+            for line in out.splitlines():
+                if any(m in line for m in WARP_PARSE_ERRORS[:2]):
+                    print(f"    !! {line.strip()}")
+            msg = (f"[{label}] rejected an argument (Warp exits 0 on parse "
+                   f"errors, so this would otherwise look like success). "
+                   f"Full output: {config.DATA_DIR}/logs/{label}.log")
+        else:
+            print(proc.stdout[-4000:])
+            print(proc.stderr[-4000:])
+            msg = f"[{label}] failed with exit code {proc.returncode}"
         if check:
             sys.exit(msg)
         print("WARNING: " + msg)
     else:
         print(f"    done in {elapsed:.0f} s")
-    return elapsed, proc.stdout + proc.stderr
+    return elapsed, out
 
 
 def warp(subcommand, *args, label=None, settings=True, check=True):
@@ -142,6 +180,28 @@ def record(rows, path, fieldnames):
         w.writeheader()
         w.writerows(rows)
     print(f"    wrote {path.name}  ({len(rows)} rows)")
+
+
+def require(ok, what, fix):
+    """Stop with an actionable message when a stage's inputs are not there.
+
+    Warp is lenient: given nothing to work on it prints its banner, processes
+    zero items and exits 0. A stage that "succeeds" in zero seconds has not done
+    anything, and accepting that silently pushes the real failure downstream to
+    somewhere much harder to read. So every stage states its prerequisites up
+    front and refuses to start without them.
+    """
+    if not ok:
+        sys.exit(f"\nCannot start: {what}\n  Fix: {fix}\n")
+
+
+def produced(paths, what, secs, fix):
+    """Confirm a stage actually wrote what it was supposed to write."""
+    if not paths:
+        sys.exit(f"\nThat step exited cleanly in {secs:.0f} s but produced no "
+                 f"{what}.\n  Warp processes zero items and returns success when "
+                 f"its inputs are missing or its\n  tilt series are deselected.\n"
+                 f"  Fix: {fix}\n")
 
 
 def append_runtime(stage, method, seconds, n_series, note=""):
@@ -387,6 +447,12 @@ def stage_reconstruct():
     for branch in config.BRANCHES:
         proc_dir = config.BRANCHES[branch]
         print(f"\n--- branch: {branch} ({config.BRANCH_LABELS[branch]}) ---")
+        n_xml = len(list(config.branch_dir(branch).glob("*.xml"))) \
+            if config.branch_dir(branch).exists() else 0
+        require(n_xml >= len(config.TILT_SERIES),
+                f"branch '{branch}' has {n_xml} aligned tilt series, "
+                f"needs {len(config.TILT_SERIES)}",
+                "python run_workflow.py --align")
 
         # 1. handedness check, then conditional correction
         _, out = warp("ts_defocus_hand", "--input_processing", proc_dir, "--check",
@@ -484,7 +550,16 @@ def stage_warp_pick():
     for branch in config.BRANCHES:
         proc_dir = config.BRANCHES[branch]
         matching = config.branch_dir(branch) / "matching"
+        recon = config.branch_dir(branch) / "reconstruction"
         print(f"\n--- branch: {branch} ---")
+
+        # Template matching needs tomograms. Without them Warp finds nothing to
+        # do and exits 0 in about a second.
+        n_tomo = len(list(recon.glob("*.mrc"))) if recon.exists() else 0
+        require(n_tomo >= len(config.TILT_SERIES),
+                f"branch '{branch}' has {n_tomo} tomograms in {recon}, "
+                f"needs {len(config.TILT_SERIES)}",
+                "python run_workflow.py --reconstruct")
 
         if not (matching.exists() and list(matching.glob(f"*{config.TEMPLATE_EMDB_ID}.star"))):
             secs, _ = warp("ts_template_match",
@@ -497,6 +572,12 @@ def stage_warp_pick():
                            "--whiten",
                            "--perdevice", 1,
                            label=f"template_match_warp_{branch}")
+            produced(list(matching.glob("*.mrc")) if matching.exists() else [],
+                     "correlation volumes", secs,
+                     f"check that the tilt series are still selected:\n"
+                     f"       WarpTools change_selection --settings "
+                     f"{config.TILTSERIES_SETTINGS} \\\n"
+                     f"         --input_processing {proc_dir} --select")
             append_runtime("template_matching", f"warp_{branch}", secs,
                            len(config.TILT_SERIES),
                            "search only; peak extraction timed separately")
@@ -553,8 +634,10 @@ def stage_pytom_pick():
     branch = "etomo"                      # tomograms held constant for Task 2
     recon_dir = config.branch_dir(branch) / "reconstruction"
     tomograms = sorted(recon_dir.glob("*.mrc"))
-    if not tomograms:
-        sys.exit(f"No tomograms in {recon_dir}. Run --reconstruct first.")
+    require(len(tomograms) >= len(config.TILT_SERIES),
+            f"{len(tomograms)} tomograms in {recon_dir}, "
+            f"needs {len(config.TILT_SERIES)}",
+            "python run_workflow.py --reconstruct")
 
     config.PYTOM_DIR.mkdir(parents=True, exist_ok=True)
     template = config.PYTOM_DIR / "template_10A.mrc"
