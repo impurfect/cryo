@@ -770,12 +770,27 @@ def stage_pytom_pick():
         else:
             print(f"    {name}: search already done - skipping")
 
-        secs, _ = run([extract_exe,
+        # Give PyTom an explicit cutoff instead of its automatic one, computed
+        # the same way Warp computes its own: N standard deviations above the
+        # correlation volume's background.
+        #
+        # This is not a workaround, it is the fairer choice. Warp thresholds at
+        # "N sigma above background"; PyTom's default instead fits an extreme-
+        # value model and targets a false-alarm count, which on this data chose
+        # a cutoff above every peak in the volume. Two pickers judged by two
+        # different rules cannot be compared on how many particles they find.
+        # Using one rule for both makes the counts mean the same thing.
+        cutoff = _pytom_sigma_cutoff(tomo, config.EXTRACT_THRESHOLD_SIGMA)
+        extract_cmd = [extract_exe,
                        "-j", job_json,
                        "-n", config.PYTOM_MAX_PARTICLES,
-                       "--number-of-false-positives", config.PYTOM_FALSE_POSITIVES,
-                       "--particle-diameter", config.TEMPLATE_DIAMETER_A],
-                      f"pytom_extract_{name}")
+                       "--particle-diameter", config.TEMPLATE_DIAMETER_A]
+        if cutoff is not None:
+            print(f"    cutoff {cutoff:.4f} "
+                  f"(= mean + {config.EXTRACT_THRESHOLD_SIGMA:g} x std of the "
+                  f"correlation volume)")
+            extract_cmd += ["--cut-off", round(cutoff, 5)]
+        secs, _ = run(extract_cmd, f"pytom_extract_{name}")
         total_extract += secs
         per_tomo.append(name)
 
@@ -796,15 +811,40 @@ def stage_pytom_pick():
                 f"{config.PYTOM_DIR}/template_10A.mrc\n"
                 f"       against a tomogram; the signs must match, else set\n"
                 f"       PYTOM_INVERT_TEMPLATE = True in config.py\n"
-                f"    3. signal - in {name}_scores.mrc, (max-mean)/std must "
-                f"exceed\n"
-                f"       sqrt(2*ln(n_voxels)), about 5.6 for these volumes;\n"
-                f"       at or below that, the peaks ARE the noise\n")
+                f"    3. signal - in {name}_scores.mrc, (max-mean)/std should "
+                f"clear\n"
+                f"       about 4.3 sigma. That is sqrt(2*ln(Neff)) where Neff is "
+                f"the\n"
+                f"       volume divided by the particle volume - NOT the raw "
+                f"voxel\n"
+                f"       count, because a correlation volume is smooth and its "
+                f"voxels\n"
+                f"       are not independent samples.\n")
         print(f"    {found} particles")
 
     append_runtime("template_matching", "pytom", total_search, len(per_tomo),
                    "sum over tomograms, one GPU")
     append_runtime("peak_extraction", "pytom", total_extract, len(per_tomo))
+
+
+def _pytom_sigma_cutoff(tomo_path, sigma):
+    """Cutoff for PyTom expressed in the same currency Warp uses.
+
+    Warp reports a peak as "how many standard deviations above this volume's
+    background", and thresholds on that. PyTom's scores are raw correlation
+    coefficients, so the equivalent cutoff has to be computed from the volume
+    itself: mean + sigma * standard deviation.
+
+    Returns None if the correlation volume cannot be found, in which case the
+    caller falls back to PyTom's own automatic estimate.
+    """
+    import mrcfile
+    hits = sorted(config.PYTOM_DIR.glob(f"{tomo_path.stem}*scores.mrc"))
+    if not hits:
+        return None
+    with mrcfile.open(hits[0], permissive=True) as m:
+        data = np.asarray(m.data, dtype=np.float32)
+    return float(data.mean() + sigma * data.std())
 
 
 def _count_star_rows(directory, stem):
@@ -814,7 +854,7 @@ def _count_star_rows(directory, stem):
         return 0
     n = 0
     for line in hits[0].read_text(errors="ignore").splitlines():
-        line = line.strip()
+        line = line.strip()                       # STAR data rows are indented
         if line and (line[0].isdigit() or line[0] == "-"):
             n += 1
     return n
