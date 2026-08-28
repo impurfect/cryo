@@ -644,11 +644,27 @@ def stage_pytom_pick():
     mask = config.PYTOM_DIR / "mask_10A.mrc"
 
     # --- 1. template -------------------------------------------------------
+    # The input voxel size decides how big the template ends up. Read it from the
+    # map's own header rather than assuming: EMD-15854 is 0.729 A/voxel, and
+    # assuming a round 1.0 would scale the template 1.37x, so it would no longer
+    # match the particles at any position or orientation.
+    import mrcfile
+    if config.TEMPLATE_VOXEL_SIZE_A is None:
+        with mrcfile.open(config.TEMPLATE_MAP, permissive=True, header_only=True) as m:
+            in_angpix = float(m.voxel_size.x)
+        if not (0.1 < in_angpix < 20):
+            sys.exit(f"{config.TEMPLATE_MAP} reports a voxel size of {in_angpix} A, "
+                     f"which is not credible. Set TEMPLATE_VOXEL_SIZE_A in "
+                     f"config.py by hand.")
+        print(f"    template map voxel size from header: {in_angpix:.4f} A")
+    else:
+        in_angpix = config.TEMPLATE_VOXEL_SIZE_A
+
     if not template.exists():
         cmd = ["pytom_create_template.py",
                "-i", config.TEMPLATE_MAP,
                "-o", template,
-               "--input-voxel-size-angstrom", config.TEMPLATE_VOXEL_SIZE_A,
+               "--input-voxel-size-angstrom", round(in_angpix, 4),
                "--output-voxel-size-angstrom", config.TOMO_ANGPIX,
                "--center"]
         if config.PYTOM_INVERT_TEMPLATE:
@@ -666,6 +682,17 @@ def stage_pytom_pick():
     import mrcfile
     with mrcfile.open(template, permissive=True) as m:
         box = int(m.data.shape[0])
+
+    # A template whose box cannot comfortably hold the particle means the
+    # scaling went wrong somewhere. Catch it here rather than after an hour of
+    # matching that finds nothing.
+    particle_voxels = config.TEMPLATE_DIAMETER_A / config.TOMO_ANGPIX
+    if box < particle_voxels * 1.5:
+        sys.exit(f"Template box is {box} voxels but the particle is "
+                 f"{particle_voxels:.0f} voxels across - too tight. Check the "
+                 f"input voxel size ({in_angpix:.4f} A) against the map header.")
+    print(f"    template box {box}^3 voxels = {box * config.TOMO_ANGPIX:.0f} A, "
+          f"particle {particle_voxels:.0f} voxels across")
 
     mask_box = None
     if mask.exists():

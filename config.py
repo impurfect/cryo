@@ -159,7 +159,14 @@ TEMPLATE_EMDB_ID = 15854
 TEMPLATE_DIAMETER_A = 130.0        # outer diameter of apoferritin
 TEMPLATE_RADIUS_A = TEMPLATE_DIAMETER_A / 2.0
 TEMPLATE_SYMMETRY = "O"            # octahedral: 24 rotations map the shell onto itself
-TEMPLATE_VOXEL_SIZE_A = 1.0        # voxel size of the deposited EMD-15854 map
+# Voxel size of the deposited EMD-15854 map, in Angstroms.
+# None means "read it from the map's own header", which is the right choice:
+# EMDB maps are deposited at whatever sampling the authors used, and it is rarely
+# a round number - EMD-15854 is 0.729 A/voxel. Assuming 1.0 rescales the template
+# by 1/0.729 = 1.37x, turning a 130 A shell into a 178 A one, and template
+# matching then finds nothing at all because it is looking for the wrong size of
+# object. Set a number here only to override a map with a wrong or absent header.
+TEMPLATE_VOXEL_SIZE_A = None
 
 # Angular search fineness. Warp expresses this as "subdivisions":
 #   2 -> 15 deg step, 3 -> 7.5 deg, 4 -> 3.75 deg.
