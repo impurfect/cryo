@@ -198,13 +198,29 @@ EXTRACT_THRESHOLD_SIGMA = 3.0
 # independent samples is closer to (volume / particle volume) = about 11,000,
 # giving a realistic noise ceiling of sqrt(2*ln(11185)) = 4.3 sigma.
 #
-# 4.5 sits just above that. analyze.py also plots yield against cutoff from 3 to
-# 12, so a reader can see immediately whether any conclusion depends on it.
-PICK_THRESHOLD_SIGMA = 4.5
+# On this data the strongest peak in each volume lands at 4.0-5.0 sigma, i.e.
+# right AT that 4.3 ceiling. Thresholding at 4.5 would discard almost everything
+# and leave too few particles to compare. So the analysis uses the same 3 sigma
+# the extraction used - all the picks, none thrown away silently - and leans on
+# the tools that make the choice visible instead: analyze.py plots yield against
+# cutoff from 3 to 12, sweeps the matching radius, and splits every score
+# distribution into picks the other tool confirmed and picks it did not.
+#
+# Be honest about what this means: with peaks this close to the noise ceiling, a
+# meaningful fraction of these picks will be false positives. That is a property
+# of 5 tilt series of a small particle at 10 A/pixel, not something a threshold
+# can fix. It is why the comparison rests on paired differences between methods
+# on identical data, where a shared false-positive rate largely cancels, rather
+# than on any absolute count.
+PICK_THRESHOLD_SIGMA = 3.0
 
 # Maximum number of particles PyTom is allowed to extract per tomogram.
 # Set generously so that PyTom is not the one truncating the comparison.
-PYTOM_MAX_PARTICLES = 1500
+# TS_17 hit 1500 exactly, which means it was truncated - and a truncated count
+# silently biases the headline "how many particles did each tool find?" metric.
+# Set the ceiling high enough that it never binds, and let the score threshold do
+# the selecting.
+PYTOM_MAX_PARTICLES = 3000
 
 # How many false positives PyTom should tolerate when it picks its own cutoff.
 # PyTom does not take a sigma threshold; it estimates a cutoff from an extreme-
